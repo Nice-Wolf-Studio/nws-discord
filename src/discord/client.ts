@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, TextChannel, DMChannel, Message, User } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, TextChannel, DMChannel, Message, User } from 'discord.js';
 
 let client: Client | null = null;
 let isReady = false;
@@ -22,8 +22,8 @@ export function getClient(): Client {
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.DirectMessageReactions,
       ],
-      // Required for DMs
-      partials: [],
+      // Required for receiving DMs
+      partials: [Partials.Channel, Partials.Message],
     });
 
     client.on('ready', () => {
@@ -33,6 +33,26 @@ export function getClient(): Client {
 
     client.on('error', (error) => {
       console.error('Discord client error:', error);
+    });
+
+    // Listen for incoming DMs from allowed users
+    client.on('messageCreate', async (message) => {
+      // Ignore bot messages
+      if (message.author.bot) return;
+
+      // Only handle DMs
+      if (!message.channel.isDMBased()) return;
+
+      // Only from allowed users
+      if (!isAllowedDmUser(message.author.id)) {
+        console.log(`Ignored DM from non-allowed user: ${message.author.tag}`);
+        return;
+      }
+
+      // Store the message
+      const { storeIncomingDm } = await import('../db/queries.js');
+      storeIncomingDm(message.id, message.author.id, message.author.tag, message.content);
+      console.log(`DM received from ${message.author.tag}: ${message.content.substring(0, 50)}...`);
     });
   }
   return client;

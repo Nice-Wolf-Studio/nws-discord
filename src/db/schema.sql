@@ -38,7 +38,19 @@ CREATE TABLE IF NOT EXISTS dedup_cache (
   PRIMARY KEY (api_key_id, idempotency_key)
 );
 
+-- Incoming DMs (from allowed users)
+CREATE TABLE IF NOT EXISTS incoming_dms (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  username TEXT NOT NULL,
+  content TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  read INTEGER DEFAULT 0
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_log_api_key ON audit_log(api_key_id);
 CREATE INDEX IF NOT EXISTS idx_dedup_created ON dedup_cache(created_at);
+CREATE INDEX IF NOT EXISTS idx_incoming_dms_user ON incoming_dms(user_id);
+CREATE INDEX IF NOT EXISTS idx_incoming_dms_timestamp ON incoming_dms(timestamp);

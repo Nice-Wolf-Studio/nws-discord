@@ -129,6 +129,40 @@ export async function startMcpServer() {
           required: ['channel', 'messageId', 'emoji'],
         },
       },
+      {
+        name: 'check-inbox',
+        description: 'Check for incoming DMs from allowed users',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            unreadOnly: { type: 'boolean', description: 'Only show unread messages', default: true },
+            limit: { type: 'number', description: 'Max messages to return', default: 10 },
+          },
+        },
+      },
+      {
+        name: 'send-dm',
+        description: 'Send a DM to an allowed user',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            userId: { type: 'string', description: 'Discord user ID' },
+            content: { type: 'string', description: 'Message content' },
+          },
+          required: ['userId', 'content'],
+        },
+      },
+      {
+        name: 'mark-dm-read',
+        description: 'Mark DM messages as read',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs to mark as read' },
+          },
+          required: ['ids'],
+        },
+      },
     ],
   }));
 
@@ -175,6 +209,31 @@ export async function startMcpServer() {
               messageId: parsed.messageId,
               emoji: parsed.emoji,
             }),
+          });
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'check-inbox': {
+          const unreadOnly = (args as { unreadOnly?: boolean }).unreadOnly !== false;
+          const limit = (args as { limit?: number }).limit || 10;
+          const result = await callApi(`/dm/inbox/all?unread=${unreadOnly}&limit=${limit}`);
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'send-dm': {
+          const { userId, content } = args as { userId: string; content: string };
+          const result = await callApi(`/dm/${userId}`, {
+            method: 'POST',
+            body: JSON.stringify({ content }),
+          });
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'mark-dm-read': {
+          const { ids } = args as { ids: string[] };
+          const result = await callApi('/dm/inbox/read', {
+            method: 'POST',
+            body: JSON.stringify({ ids }),
           });
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         }

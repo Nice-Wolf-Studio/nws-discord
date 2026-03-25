@@ -132,3 +132,63 @@ export function cleanupAuditLog(retentionDays: number): number {
   const result = db.prepare('DELETE FROM audit_log WHERE timestamp < ?').run(cutoff);
   return result.changes;
 }
+
+// Incoming DM queries
+export interface IncomingDm {
+  id: string;
+  user_id: string;
+  username: string;
+  content: string;
+  timestamp: number;
+  read: number;
+}
+
+export function storeIncomingDm(
+  id: string,
+  userId: string,
+  username: string,
+  content: string
+): void {
+  db.prepare(`
+    INSERT OR IGNORE INTO incoming_dms (id, user_id, username, content, timestamp, read)
+    VALUES (?, ?, ?, ?, ?, 0)
+  `).run(id, userId, username, content, Date.now());
+}
+
+export function getIncomingDms(userId?: string, unreadOnly = false, limit = 50): IncomingDm[] {
+  let query = 'SELECT * FROM incoming_dms';
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (userId) {
+    conditions.push('user_id = ?');
+    params.push(userId);
+  }
+  if (unreadOnly) {
+    conditions.push('read = 0');
+  }
+
+  if (conditions.length > 0) {
+    query += ' WHERE ' + conditions.join(' AND ');
+  }
+  query += ' ORDER BY timestamp DESC LIMIT ?';
+  params.push(limit);
+
+  return db.prepare(query).all(...params) as IncomingDm[];
+}
+
+export function markDmsRead(ids: string[]): number {
+  if (ids.length === 0) return 0;
+  const placeholders = ids.map(() => '?').join(',');
+  const result = db.prepare(`UPDATE incoming_dms SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+  return result.changes;
+}
+
+export function getUnreadDmCount(userId?: string): number {
+  if (userId) {
+    const result = db.prepare('SELECT COUNT(*) as count FROM incoming_dms WHERE user_id = ? AND read = 0').get(userId) as { count: number };
+    return result.count;
+  }
+  const result = db.prepare('SELECT COUNT(*) as count FROM incoming_dms WHERE read = 0').get() as { count: number };
+  return result.count;
+}
