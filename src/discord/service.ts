@@ -1,5 +1,5 @@
 import { EmbedBuilder, TextChannel } from 'discord.js';
-import { getChannel, getAllChannels, getGuilds, isDiscordReady } from './client.js';
+import { getChannel, getAllChannels, getGuilds, isDiscordReady, getDmChannel, isAllowedDmUser, getUser } from './client.js';
 import { checkDedup, setDedup, logAction, canAccessChannel, getChannelPermissions } from '../db/queries.js';
 
 export interface DiscordEmbed {
@@ -227,6 +227,79 @@ export class DiscordService {
 
   listGuilds() {
     return getGuilds();
+  }
+
+  // DM Methods
+  async sendDm(
+    userId: string,
+    content?: string,
+    embed?: DiscordEmbed
+  ): Promise<ServiceResult<{ messageId: string }>> {
+    if (!isAllowedDmUser(userId)) {
+      return { success: false, error: 'User not allowed for DMs', errorCode: 'DM_NOT_ALLOWED' };
+    }
+
+    const dmChannel = await getDmChannel(userId);
+    if (!dmChannel) {
+      return { success: false, error: 'Could not create DM channel', errorCode: 'DM_FAILED' };
+    }
+
+    const messageOptions: { content?: string; embeds?: EmbedBuilder[] } = {};
+    if (content) messageOptions.content = content;
+    if (embed) {
+      const embedBuilder = new EmbedBuilder();
+      if (embed.title) embedBuilder.setTitle(embed.title);
+      if (embed.description) embedBuilder.setDescription(embed.description);
+      if (embed.color !== undefined) embedBuilder.setColor(embed.color);
+      if (embed.fields) embedBuilder.addFields(embed.fields);
+      messageOptions.embeds = [embedBuilder];
+    }
+
+    if (!messageOptions.content && !messageOptions.embeds) {
+      return { success: false, error: 'Message must have content or embed', errorCode: 'INVALID_EMBED' };
+    }
+
+    try {
+      const message = await dmChannel.send(messageOptions);
+      return { success: true, data: { messageId: message.id } };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : 'Unknown error';
+      return { success: false, error, errorCode: 'DISCORD_ERROR' };
+    }
+  }
+
+  async readDms(
+    userId: string,
+    limit = 50
+  ): Promise<ServiceResult<Array<{ id: string; content: string; author: string; timestamp: string; fromBot: boolean }>>> {
+    if (!isAllowedDmUser(userId)) {
+      return { success: false, error: 'User not allowed for DMs', errorCode: 'DM_NOT_ALLOWED' };
+    }
+
+    const dmChannel = await getDmChannel(userId);
+    if (!dmChannel) {
+      return { success: false, error: 'Could not create DM channel', errorCode: 'DM_FAILED' };
+    }
+
+    try {
+      const messages = await dmChannel.messages.fetch({ limit: Math.min(limit, 100) });
+      const result = Array.from(messages.values()).map((m) => ({
+        id: m.id,
+        content: m.content,
+        author: m.author.username,
+        timestamp: m.createdAt.toISOString(),
+        fromBot: m.author.bot,
+      }));
+
+      return { success: true, data: result };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : 'Unknown error';
+      return { success: false, error, errorCode: 'DISCORD_ERROR' };
+    }
+  }
+
+  isAllowedDmUser(userId: string): boolean {
+    return isAllowedDmUser(userId);
   }
 
   getHealth() {

@@ -1,7 +1,16 @@
-import { Client, GatewayIntentBits, TextChannel, Message } from 'discord.js';
+import { Client, GatewayIntentBits, TextChannel, DMChannel, Message, User } from 'discord.js';
 
 let client: Client | null = null;
 let isReady = false;
+
+// Allowed DM user IDs (comma-separated in env)
+const ALLOWED_DM_USERS = new Set(
+  (process.env.ALLOWED_DM_USERS || '').split(',').map(id => id.trim()).filter(Boolean)
+);
+
+export function isAllowedDmUser(userId: string): boolean {
+  return ALLOWED_DM_USERS.has(userId);
+}
 
 export function getClient(): Client {
   if (!client) {
@@ -10,7 +19,11 @@ export function getClient(): Client {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.DirectMessageReactions,
       ],
+      // Required for DMs
+      partials: [],
     });
 
     client.on('ready', () => {
@@ -55,6 +68,29 @@ export async function getChannel(channelId: string): Promise<TextChannel | null>
       return channel as TextChannel;
     }
     return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getDmChannel(userId: string): Promise<DMChannel | null> {
+  if (!client || !isReady) return null;
+  if (!isAllowedDmUser(userId)) return null;
+
+  try {
+    const user = await client.users.fetch(userId);
+    const dmChannel = await user.createDM();
+    return dmChannel;
+  } catch {
+    return null;
+  }
+}
+
+export async function getUser(userId: string): Promise<User | null> {
+  if (!client || !isReady) return null;
+
+  try {
+    return await client.users.fetch(userId);
   } catch {
     return null;
   }

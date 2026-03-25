@@ -5,6 +5,7 @@ import { healthRoutes } from './routes/health.js';
 import { channelRoutes } from './routes/channels.js';
 import { guildRoutes } from './routes/guilds.js';
 import { adminRoutes } from './routes/admin.js';
+import { dmRoutes } from './routes/dm.js';
 
 export function createApp() {
   const app = new Hono();
@@ -18,6 +19,7 @@ export function createApp() {
   app.route('/channels', channelRoutes);
   app.route('/guilds', guildRoutes);
   app.route('/admin', adminRoutes);
+  app.route('/dm', dmRoutes);
 
   // Root
   app.get('/', (c) => {
