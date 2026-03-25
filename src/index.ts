@@ -1,0 +1,45 @@
+import { serve } from '@hono/node-server';
+import { createApp } from './http/server.js';
+import { initDiscord } from './discord/client.js';
+import { cleanupDedup, cleanupAuditLog } from './db/queries.js';
+
+// Import db to initialize it
+import './db/index.js';
+
+const PORT = parseInt(process.env.PORT || '3000', 10);
+const DEDUP_WINDOW = parseInt(process.env.DEDUP_WINDOW_SECONDS || '300', 10);
+
+async function main() {
+  console.log('Starting nws-discord service...');
+
+  // Initialize Discord
+  console.log('Connecting to Discord...');
+  await initDiscord();
+  console.log('Discord connected!');
+
+  // Start HTTP server
+  const app = createApp();
+  serve({ fetch: app.fetch, port: PORT }, (info) => {
+    console.log(`HTTP server running on port ${info.port}`);
+  });
+
+  // Periodic cleanup
+  setInterval(() => {
+    const dedupCleaned = cleanupDedup(DEDUP_WINDOW);
+    if (dedupCleaned > 0) {
+      console.log(`Cleaned ${dedupCleaned} expired dedup entries`);
+    }
+  }, 60_000); // Every minute
+
+  setInterval(() => {
+    const auditCleaned = cleanupAuditLog(30); // 30 day retention
+    if (auditCleaned > 0) {
+      console.log(`Cleaned ${auditCleaned} old audit log entries`);
+    }
+  }, 3600_000); // Every hour
+}
+
+main().catch((err) => {
+  console.error('Fatal error:', err);
+  process.exit(1);
+});
