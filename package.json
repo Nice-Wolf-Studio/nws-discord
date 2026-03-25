@@ -11,7 +11,12 @@
     "mcp": "node dist/mcp/server.js",
     "mcp:dev": "tsx src/mcp/server.ts"
   },
-  "keywords": ["discord", "api", "mcp", "notification"],
+  "keywords": [
+    "discord",
+    "api",
+    "mcp",
+    "notification"
+  ],
   "author": "Nice Wolf Studio",
   "license": "MIT",
   "dependencies": {
@@ -19,6 +24,7 @@
     "@modelcontextprotocol/sdk": "^1.2.0",
     "better-sqlite3": "^11.6.0",
     "discord.js": "^14.14.1",
+    "dotenv": "^17.3.1",
     "hono": "^4.6.12",
     "nanoid": "^5.0.9",
     "zod": "^3.23.8"
