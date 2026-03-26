@@ -38,7 +38,29 @@ CREATE TABLE IF NOT EXISTS dedup_cache (
   PRIMARY KEY (api_key_id, idempotency_key)
 );
 
--- Incoming DMs (from allowed users)
+-- DM Sessions (conversations)
+CREATE TABLE IF NOT EXISTS dm_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',  -- active, stopped, executed
+  title TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  executed_at INTEGER
+);
+
+-- Session messages (conversation history)
+CREATE TABLE IF NOT EXISTS session_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  role TEXT NOT NULL,  -- user, bot
+  content TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES dm_sessions(id) ON DELETE CASCADE
+);
+
+-- Incoming DMs (from allowed users) - legacy/non-session
 CREATE TABLE IF NOT EXISTS incoming_dms (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -54,3 +76,6 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_api_key ON audit_log(api_key_id);
 CREATE INDEX IF NOT EXISTS idx_dedup_created ON dedup_cache(created_at);
 CREATE INDEX IF NOT EXISTS idx_incoming_dms_user ON incoming_dms(user_id);
 CREATE INDEX IF NOT EXISTS idx_incoming_dms_timestamp ON incoming_dms(timestamp);
+CREATE INDEX IF NOT EXISTS idx_dm_sessions_user ON dm_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_dm_sessions_status ON dm_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);

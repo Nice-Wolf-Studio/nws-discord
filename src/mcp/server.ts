@@ -163,6 +163,46 @@ export async function startMcpServer() {
           required: ['ids'],
         },
       },
+      {
+        name: 'get-pending-sessions',
+        description: 'Get DM sessions that are ready for execution (user said "execute")',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'get-session',
+        description: 'Get a specific session with all its messages and context',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string', description: 'Session ID' },
+          },
+          required: ['sessionId'],
+        },
+      },
+      {
+        name: 'respond-to-session',
+        description: 'Send a response to a session (sends DM to user). Session stays open for continued conversation until user says "stop".',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string', description: 'Session ID' },
+            content: { type: 'string', description: 'Response message content' },
+            keepOpen: { type: 'boolean', description: 'Keep session open for more replies (default: true)', default: true },
+          },
+          required: ['sessionId', 'content'],
+        },
+      },
+      {
+        name: 'complete-session',
+        description: 'Mark a session as complete after processing',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string', description: 'Session ID' },
+          },
+          required: ['sessionId'],
+        },
+      },
     ],
   }));
 
@@ -234,6 +274,34 @@ export async function startMcpServer() {
           const result = await callApi('/dm/inbox/read', {
             method: 'POST',
             body: JSON.stringify({ ids }),
+          });
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'get-pending-sessions': {
+          const result = await callApi('/sessions/pending');
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'get-session': {
+          const { sessionId } = args as { sessionId: string };
+          const result = await callApi(`/sessions/${sessionId}`);
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'respond-to-session': {
+          const { sessionId, content, keepOpen = true } = args as { sessionId: string; content: string; keepOpen?: boolean };
+          const result = await callApi(`/sessions/${sessionId}/respond`, {
+            method: 'POST',
+            body: JSON.stringify({ content, keepOpen }),
+          });
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'complete-session': {
+          const { sessionId } = args as { sessionId: string };
+          const result = await callApi(`/sessions/${sessionId}/complete`, {
+            method: 'POST',
           });
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         }

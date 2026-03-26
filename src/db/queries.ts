@@ -1,4 +1,5 @@
 import { db, hashApiKey } from './index.js';
+import { nanoid } from 'nanoid';
 
 export interface ApiKey {
   id: string;
@@ -191,4 +192,130 @@ export function getUnreadDmCount(userId?: string): number {
   }
   const result = db.prepare('SELECT COUNT(*) as count FROM incoming_dms WHERE read = 0').get() as { count: number };
   return result.count;
+}
+
+// Session queries
+export interface DmSession {
+  id: string;
+  user_id: string;
+  status: 'active' | 'stopped' | 'executed' | 'waiting';
+  title: string | null;
+  created_at: number;
+  updated_at: number;
+  executed_at: number | null;
+}
+
+export interface SessionMessage {
+  id: string;
+  session_id: string;
+  user_id: string;
+  role: 'user' | 'bot';
+  content: string;
+  timestamp: number;
+}
+
+export function createSession(userId: string, title?: string): DmSession {
+  const id = nanoid(12);
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT INTO dm_sessions (id, user_id, status, title, created_at, updated_at)
+    VALUES (?, ?, 'active', ?, ?, ?)
+  `).run(id, userId, title || null, now, now);
+
+  return {
+    id,
+    user_id: userId,
+    status: 'active',
+    title: title || null,
+    created_at: now,
+    updated_at: now,
+    executed_at: null,
+  };
+}
+
+export function getActiveSession(userId: string): DmSession | null {
+  const result = db.prepare(`
+    SELECT * FROM dm_sessions
+    WHERE user_id = ? AND status = 'active'
+    ORDER BY created_at DESC LIMIT 1
+  `).get(userId) as DmSession | undefined;
+  return result || null;
+}
+
+export function getSession(sessionId: string): DmSession | null {
+  const result = db.prepare('SELECT * FROM dm_sessions WHERE id = ?').get(sessionId) as DmSession | undefined;
+  return result || null;
+}
+
+export function getUserSessions(userId: string, limit = 20): DmSession[] {
+  return db.prepare(`
+    SELECT * FROM dm_sessions
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(userId, limit) as DmSession[];
+}
+
+export function updateSessionStatus(sessionId: string, status: 'active' | 'stopped' | 'executed' | 'waiting'): boolean {
+  const now = Date.now();
+  const executedAt = status === 'executed' ? now : null;
+
+  const result = db.prepare(`
+    UPDATE dm_sessions
+    SET status = ?, updated_at = ?, executed_at = COALESCE(?, executed_at)
+    WHERE id = ?
+  `).run(status, now, executedAt, sessionId);
+
+  return result.changes > 0;
+}
+
+export function getWaitingSession(userId: string): DmSession | null {
+  const result = db.prepare(`
+    SELECT * FROM dm_sessions
+    WHERE user_id = ? AND status = 'waiting'
+    ORDER BY updated_at DESC LIMIT 1
+  `).get(userId) as DmSession | undefined;
+  return result || null;
+}
+
+export function updateSessionTitle(sessionId: string, title: string): boolean {
+  const result = db.prepare(`
+    UPDATE dm_sessions SET title = ?, updated_at = ? WHERE id = ?
+  `).run(title, Date.now(), sessionId);
+  return result.changes > 0;
+}
+
+export function addSessionMessage(
+  sessionId: string,
+  userId: string,
+  role: 'user' | 'bot',
+  content: string,
+  messageId?: string
+): SessionMessage {
+  const id = messageId || nanoid(12);
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT INTO session_messages (id, session_id, user_id, role, content, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, sessionId, userId, role, content, now);
+
+  // Update session timestamp
+  db.prepare('UPDATE dm_sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
+
+  return { id, session_id: sessionId, user_id: userId, role, content, timestamp: now };
+}
+
+export function getSessionMessages(sessionId: string): SessionMessage[] {
+  return db.prepare(`
+    SELECT * FROM session_messages
+    WHERE session_id = ?
+    ORDER BY timestamp ASC
+  `).all(sessionId) as SessionMessage[];
+}
+
+export function getSessionContext(sessionId: string): string {
+  const messages = getSessionMessages(sessionId);
+  return messages.map(m => `${m.role === 'user' ? 'User' : 'Bot'}: ${m.content}`).join('\n');
 }
