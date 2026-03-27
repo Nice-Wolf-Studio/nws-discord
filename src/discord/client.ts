@@ -12,6 +12,46 @@ export function isAllowedDmUser(userId: string): boolean {
   return ALLOWED_DM_USERS.has(userId);
 }
 
+// ============================================================
+// PERSONALITY - Customize these for Sombra's voice
+// ============================================================
+
+const PROCESSING_RESPONSES = [
+  "On it",
+  "Let me check",
+  "Working on it",
+  "Give me a sec",
+  "Looking into it",
+];
+
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// Sombra webhook URL
+const SOMBRA_URL = process.env.SOMBRA_URL || 'http://localhost:3001/execute';
+
+// Simple in-memory conversation context (last 10 messages per user)
+const conversationContext = new Map<string, string[]>();
+const MAX_CONTEXT = 10;
+
+function getContext(userId: string): string {
+  const history = conversationContext.get(userId) || [];
+  return history.join('\n');
+}
+
+function addToContext(userId: string, role: 'user' | 'assistant', message: string): void {
+  const history = conversationContext.get(userId) || [];
+  history.push(`${role === 'user' ? 'User' : 'Sombra'}: ${message}`);
+
+  // Keep only last MAX_CONTEXT messages
+  while (history.length > MAX_CONTEXT) {
+    history.shift();
+  }
+
+  conversationContext.set(userId, history);
+}
+
 export function getClient(): Client {
   if (!client) {
     client = new Client({
@@ -51,115 +91,76 @@ export function getClient(): Client {
 
       const content = message.content.trim();
       const userId = message.author.id;
-      const {
-        createSession, getActiveSession, getWaitingSession, updateSessionStatus,
-        addSessionMessage, getSessionMessages, getUserSessions,
-        storeIncomingDm
-      } = await import('../db/queries.js');
 
-      // Handle commands
+      // Handle slash commands
       const cmd = content.toLowerCase();
 
-      // START - Begin new session
-      if (cmd === 'start' || cmd === '/start') {
-        // Stop any existing active session
-        const existing = getActiveSession(userId);
-        if (existing) {
-          updateSessionStatus(existing.id, 'stopped');
-        }
-
-        const session = createSession(userId);
-        await message.reply(`Session started (ID: ${session.id})\n\nTell me what you want to do. Say **execute** when ready, or **stop** to cancel.`);
-        console.log(`Session started for ${message.author.tag}: ${session.id}`);
+      // /clear - Clear conversation context
+      if (cmd === '/clear' || cmd === '/new') {
+        conversationContext.delete(userId);
+        await message.reply('Cleared. What do you need?');
         return;
       }
 
-      // STOP - End current session (active or waiting)
-      if (cmd === 'stop' || cmd === '/stop') {
-        const active = getActiveSession(userId);
-        const waiting = getWaitingSession(userId);
-        const session = active || waiting;
-        if (!session) {
-          await message.reply('No active session. Say **start** to begin.');
-          return;
-        }
-        updateSessionStatus(session.id, 'stopped');
-        await message.reply(`Session stopped (ID: ${session.id})`);
-        console.log(`Session stopped for ${message.author.tag}: ${session.id}`);
+      // /help - Show available commands
+      if (cmd === '/help') {
+        await message.reply(`Just message me. I'll figure it out.
+
+**/clear** - fresh start`);
         return;
       }
 
-      // EXECUTE - Mark session ready for execution
-      if (cmd === 'execute' || cmd === '/execute' || cmd === 'run' || cmd === '/run') {
-        const session = getActiveSession(userId);
-        if (!session) {
-          await message.reply('No active session. Say **start** to begin.');
-          return;
+      // ============================================================
+      // DIRECT WEBHOOK CALL TO SOMBRA - No polling!
+      // ============================================================
+
+      console.log(`[Discord] Message from ${message.author.tag}: ${content.substring(0, 50)}...`);
+
+      // Send acknowledgment
+      await message.reply(pick(PROCESSING_RESPONSES));
+
+      try {
+        // Get conversation context
+        const context = getContext(userId);
+        addToContext(userId, 'user', content);
+
+        // Call Sombra webhook directly
+        const response = await fetch(SOMBRA_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: userId,
+            message: content,
+            context: context || undefined,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Sombra returned ${response.status}`);
         }
 
-        const messages = getSessionMessages(session.id);
-        if (messages.length === 0) {
-          await message.reply('Session is empty. Tell me what you want to do first.');
-          return;
+        const result = await response.json() as {
+          success: boolean;
+          response: string;
+          actions: string[];
+          duration_ms: number;
+        };
+
+        if (result.success) {
+          // Add response to context
+          addToContext(userId, 'assistant', result.response);
+
+          // Send response back to Discord (handle length limit)
+          const reply = result.response.slice(0, 1900);
+          await message.reply(reply);
+
+          console.log(`[Discord] Responded in ${result.duration_ms}ms: ${reply.substring(0, 50)}...`);
+        } else {
+          await message.reply("Something went wrong. Try again?");
         }
-
-        updateSessionStatus(session.id, 'executed');
-        await message.reply(`Session marked for execution (ID: ${session.id})\n\nClaude Code will pick this up and respond.`);
-        console.log(`Session executed for ${message.author.tag}: ${session.id}`);
-        return;
-      }
-
-      // HISTORY - Show past sessions
-      if (cmd === 'history' || cmd === '/history') {
-        const sessions = getUserSessions(userId, 10);
-        if (sessions.length === 0) {
-          await message.reply('No sessions yet. Say **start** to begin.');
-          return;
-        }
-
-        const list = sessions.map((s, i) => {
-          const date = new Date(s.created_at).toLocaleString();
-          const title = s.title || '(untitled)';
-          return `${i + 1}. [${s.status}] ${title} - ${date} (${s.id})`;
-        }).join('\n');
-
-        await message.reply(`**Your Sessions:**\n\`\`\`\n${list}\n\`\`\``);
-        return;
-      }
-
-      // HELP
-      if (cmd === 'help' || cmd === '/help') {
-        await message.reply(`**Commands:**
-• **start** - Begin a new session
-• **stop** - End current session
-• **execute** / **run** - Send session to Claude Code
-• **history** - View past sessions
-• **help** - Show this message
-
-During a session, just type normally. I'll save your messages until you say **execute**.`);
-        return;
-      }
-
-      // Regular message - add to session or store as inbox
-      const activeSession = getActiveSession(userId);
-      const waitingSession = getWaitingSession(userId);
-
-      if (activeSession) {
-        // Add to active session (user is building up messages before execute)
-        addSessionMessage(activeSession.id, userId, 'user', content, message.id);
-        await message.reply(`Got it. Continue, or say **execute** when ready.`);
-        console.log(`Session message from ${message.author.tag}: ${content.substring(0, 50)}...`);
-      } else if (waitingSession) {
-        // Bot responded and is waiting for user reply - auto-execute
-        addSessionMessage(waitingSession.id, userId, 'user', content, message.id);
-        updateSessionStatus(waitingSession.id, 'executed');
-        await message.reply(`Got it, processing...`);
-        console.log(`Waiting session reply from ${message.author.tag}: ${content.substring(0, 50)}...`);
-      } else {
-        // No active session - store in inbox and prompt
-        storeIncomingDm(message.id, userId, message.author.tag, content);
-        await message.reply(`No active session. Say **start** to begin, or **help** for commands.`);
-        console.log(`DM (no session) from ${message.author.tag}: ${content.substring(0, 50)}...`);
+      } catch (error) {
+        console.error('[Discord] Sombra call failed:', error);
+        await message.reply("Couldn't reach Sombra. Is it running?");
       }
     });
   }
