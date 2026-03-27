@@ -42,11 +42,13 @@ CREATE TABLE IF NOT EXISTS dedup_cache (
 CREATE TABLE IF NOT EXISTS dm_sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active',  -- active, stopped, executed
+  status TEXT NOT NULL DEFAULT 'active',  -- active, stopped, executed, waiting, processing
   title TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  executed_at INTEGER
+  executed_at INTEGER,
+  locked_by TEXT,       -- Worker ID that claimed the session
+  locked_at INTEGER     -- When the session was claimed
 );
 
 -- Session messages (conversation history)
@@ -79,3 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_incoming_dms_timestamp ON incoming_dms(timestamp)
 CREATE INDEX IF NOT EXISTS idx_dm_sessions_user ON dm_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_dm_sessions_status ON dm_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
+
+-- Migrations (for existing databases)
+-- Add locked_by and locked_at columns if they don't exist
+-- SQLite doesn't support ADD COLUMN IF NOT EXISTS, so these will fail silently on fresh dbs

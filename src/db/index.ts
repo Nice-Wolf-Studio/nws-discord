@@ -19,6 +19,21 @@ db.pragma('foreign_keys = ON');
 const schema = readFileSync(join(__dirname, 'schema.sql'), 'utf-8');
 db.exec(schema);
 
+// Run migrations for existing databases
+function runMigrations() {
+  // Add locked_by and locked_at columns to dm_sessions if they don't exist
+  const columns = db.prepare(`PRAGMA table_info(dm_sessions)`).all() as { name: string }[];
+  const columnNames = columns.map(c => c.name);
+
+  if (!columnNames.includes('locked_by')) {
+    db.exec(`ALTER TABLE dm_sessions ADD COLUMN locked_by TEXT`);
+  }
+  if (!columnNames.includes('locked_at')) {
+    db.exec(`ALTER TABLE dm_sessions ADD COLUMN locked_at INTEGER`);
+  }
+}
+runMigrations();
+
 export function hashApiKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');
 }
