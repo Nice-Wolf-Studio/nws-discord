@@ -319,3 +319,196 @@ export function getSessionContext(sessionId: string): string {
   const messages = getSessionMessages(sessionId);
   return messages.map(m => `${m.role === 'user' ? 'User' : 'Bot'}: ${m.content}`).join('\n');
 }
+
+export function getPendingSessions(): DmSession[] {
+  return db.prepare(`
+    SELECT * FROM dm_sessions
+    WHERE status = 'waiting'
+    ORDER BY updated_at ASC
+  `).all() as DmSession[];
+}
+
+// ============================================================
+// Personality Session queries (restricted users)
+// ============================================================
+
+export interface PersonalitySession {
+  id: string;
+  user_id: string;
+  personality: string;
+  date: string;
+  context: string;  // JSON array
+  created_at: number;
+  last_message_at: number;
+}
+
+export interface ActivePersonality {
+  user_id: string;
+  personality: string;
+  started_at: number;
+}
+
+export function getOrCreatePersonalitySession(
+  userId: string,
+  personality: string,
+  date: string
+): PersonalitySession {
+  const existing = db.prepare(`
+    SELECT * FROM personality_sessions
+    WHERE user_id = ? AND personality = ? AND date = ?
+  `).get(userId, personality, date) as PersonalitySession | undefined;
+
+  if (existing) return existing;
+
+  const id = nanoid(12);
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT INTO personality_sessions (id, user_id, personality, date, context, created_at, last_message_at)
+    VALUES (?, ?, ?, ?, '[]', ?, ?)
+  `).run(id, userId, personality, date, now, now);
+
+  return { id, user_id: userId, personality, date, context: '[]', created_at: now, last_message_at: now };
+}
+
+export function updatePersonalitySession(id: string, context: string): void {
+  db.prepare(`
+    UPDATE personality_sessions SET context = ?, last_message_at = ? WHERE id = ?
+  `).run(context, Date.now(), id);
+}
+
+export function clearPersonalitySessions(userId: string): void {
+  db.prepare(`DELETE FROM personality_sessions WHERE user_id = ?`).run(userId);
+  db.prepare(`DELETE FROM active_personality WHERE user_id = ?`).run(userId);
+}
+
+export function cleanupOldPersonalitySessions(retentionDays = 7): number {
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
+    .toISOString().split('T')[0];
+
+  const result = db.prepare(`
+    DELETE FROM personality_sessions WHERE date < ?
+  `).run(cutoff);
+
+  return result.changes;
+}
+
+// Active personality (sticky sessions)
+export function getActivePersonality(userId: string): string | null {
+  const result = db.prepare(`
+    SELECT personality FROM active_personality WHERE user_id = ?
+  `).get(userId) as { personality: string } | undefined;
+  return result?.personality || null;
+}
+
+export function setActivePersonality(userId: string, personality: string): void {
+  db.prepare(`
+    INSERT OR REPLACE INTO active_personality (user_id, personality, started_at)
+    VALUES (?, ?, ?)
+  `).run(userId, personality, Date.now());
+}
+
+export function clearActivePersonality(userId: string): void {
+  db.prepare(`DELETE FROM active_personality WHERE user_id = ?`).run(userId);
+}
+
+// ============================================================
+// Restricted Users & Access Requests
+// ============================================================
+
+export interface RestrictedUser {
+  user_id: string;
+  username: string;
+  approved_at: number;
+  approved_by: string;
+}
+
+export interface AccessRequest {
+  user_id: string;
+  username: string;
+  requested_at: number;
+  status: 'pending' | 'approved' | 'denied';
+}
+
+export function isRestrictedUser(userId: string): boolean {
+  const result = db.prepare(`
+    SELECT 1 FROM restricted_users WHERE user_id = ?
+  `).get(userId);
+  return !!result;
+}
+
+export function addRestrictedUser(userId: string, username: string, approvedBy: string): void {
+  db.prepare(`
+    INSERT OR REPLACE INTO restricted_users (user_id, username, approved_at, approved_by)
+    VALUES (?, ?, ?, ?)
+  `).run(userId, username, Date.now(), approvedBy);
+
+  // Clean up any pending request
+  db.prepare(`DELETE FROM access_requests WHERE user_id = ?`).run(userId);
+}
+
+export function removeRestrictedUser(userId: string): boolean {
+  const result = db.prepare(`DELETE FROM restricted_users WHERE user_id = ?`).run(userId);
+  return result.changes > 0;
+}
+
+export function getRestrictedUsers(): RestrictedUser[] {
+  return db.prepare(`
+    SELECT * FROM restricted_users ORDER BY approved_at DESC
+  `).all() as RestrictedUser[];
+}
+
+// Access requests
+export function hasPendingRequest(userId: string): boolean {
+  const result = db.prepare(`
+    SELECT 1 FROM access_requests WHERE user_id = ? AND status = 'pending'
+  `).get(userId);
+  return !!result;
+}
+
+export function createAccessRequest(userId: string, username: string): boolean {
+  // Returns true if this is a new request, false if already exists
+  const existing = db.prepare(`
+    SELECT status FROM access_requests WHERE user_id = ?
+  `).get(userId) as { status: string } | undefined;
+
+  if (existing) {
+    return false;  // Already has a request
+  }
+
+  db.prepare(`
+    INSERT INTO access_requests (user_id, username, requested_at, status)
+    VALUES (?, ?, ?, 'pending')
+  `).run(userId, username, Date.now());
+
+  return true;
+}
+
+export function getPendingRequests(): AccessRequest[] {
+  return db.prepare(`
+    SELECT * FROM access_requests WHERE status = 'pending' ORDER BY requested_at ASC
+  `).all() as AccessRequest[];
+}
+
+export function approveAccessRequest(userId: string, approvedBy: string): AccessRequest | null {
+  const request = db.prepare(`
+    SELECT * FROM access_requests WHERE user_id = ?
+  `).get(userId) as AccessRequest | undefined;
+
+  if (!request) return null;
+
+  db.prepare(`
+    UPDATE access_requests SET status = 'approved' WHERE user_id = ?
+  `).run(userId);
+
+  addRestrictedUser(userId, request.username, approvedBy);
+
+  return { ...request, status: 'approved' };
+}
+
+export function denyAccessRequest(userId: string): boolean {
+  const result = db.prepare(`
+    UPDATE access_requests SET status = 'denied' WHERE user_id = ? AND status = 'pending'
+  `).run(userId);
+  return result.changes > 0;
+}
