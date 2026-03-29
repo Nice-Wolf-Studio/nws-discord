@@ -72,6 +72,41 @@ CREATE TABLE IF NOT EXISTS incoming_dms (
   read INTEGER DEFAULT 0
 );
 
+-- Personality sessions (restricted user conversations)
+CREATE TABLE IF NOT EXISTS personality_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  personality TEXT NOT NULL,
+  date TEXT NOT NULL,                -- "2026-03-29" (UTC date)
+  context TEXT DEFAULT '[]',         -- JSON array of messages
+  created_at INTEGER NOT NULL,
+  last_message_at INTEGER NOT NULL,
+  UNIQUE(user_id, personality, date)
+);
+
+-- Active personality tracking (for sticky sessions)
+CREATE TABLE IF NOT EXISTS active_personality (
+  user_id TEXT PRIMARY KEY,
+  personality TEXT NOT NULL,
+  started_at INTEGER NOT NULL
+);
+
+-- Restricted users (approved for limited access)
+CREATE TABLE IF NOT EXISTS restricted_users (
+  user_id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  approved_at INTEGER NOT NULL,
+  approved_by TEXT NOT NULL        -- admin user_id who approved
+);
+
+-- Pending access requests
+CREATE TABLE IF NOT EXISTS access_requests (
+  user_id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  requested_at INTEGER NOT NULL,
+  status TEXT DEFAULT 'pending'    -- pending, approved, denied
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_log_api_key ON audit_log(api_key_id);
@@ -81,6 +116,8 @@ CREATE INDEX IF NOT EXISTS idx_incoming_dms_timestamp ON incoming_dms(timestamp)
 CREATE INDEX IF NOT EXISTS idx_dm_sessions_user ON dm_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_dm_sessions_status ON dm_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_personality_sessions_user ON personality_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_personality_sessions_date ON personality_sessions(date);
 
 -- Migrations (for existing databases)
 -- Add locked_by and locked_at columns if they don't exist

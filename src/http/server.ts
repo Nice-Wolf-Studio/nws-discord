@@ -6,6 +6,7 @@ import { channelRoutes } from './routes/channels.js';
 import { guildRoutes } from './routes/guilds.js';
 import { adminRoutes } from './routes/admin.js';
 import { dmRoutes } from './routes/dm.js';
+import { sessionRoutes } from './routes/sessions.js';
 
 export function createApp() {
   const app = new Hono();
@@ -20,13 +21,14 @@ export function createApp() {
   app.route('/guilds', guildRoutes);
   app.route('/admin', adminRoutes);
   app.route('/dm', dmRoutes);
+  app.route('/sessions', sessionRoutes);
 
   // Root
   app.get('/', (c) => {
     return c.json({
       name: 'nws-discord',
       version: '1.0.0',
-      endpoints: ['/health', '/channels', '/guilds', '/admin'],
+      endpoints: ['/health', '/channels', '/guilds', '/admin', '/dm', '/sessions'],
     });
   });
 

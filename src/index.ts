@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { createApp } from './http/server.js';
 import { initDiscord } from './discord/client.js';
-import { cleanupDedup, cleanupAuditLog } from './db/queries.js';
+import { cleanupDedup, cleanupAuditLog, cleanupOldPersonalitySessions } from './db/queries.js';
 
 // Import db to initialize it
 import './db/index.js';
@@ -36,6 +36,11 @@ async function main() {
     const auditCleaned = cleanupAuditLog(30); // 30 day retention
     if (auditCleaned > 0) {
       console.log(`Cleaned ${auditCleaned} old audit log entries`);
+    }
+
+    const sessionsCleaned = cleanupOldPersonalitySessions(7); // 7 day retention
+    if (sessionsCleaned > 0) {
+      console.log(`Cleaned ${sessionsCleaned} old personality sessions`);
     }
   }, 3600_000); // Every hour
 }
