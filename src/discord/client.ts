@@ -448,7 +448,43 @@ export async function initDiscord(): Promise<void> {
   }
 
   const discordClient = getClient();
-  await discordClient.login(token);
+
+  // Retry with backoff for rate limit errors
+  const maxRetries = 5;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await discordClient.login(token);
+      break; // Success, exit loop
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Check for session rate limit
+      if (errorMessage.includes('Not enough sessions remaining')) {
+        // Try to parse reset time from error message
+        const resetMatch = errorMessage.match(/resets at ([^\s]+)/);
+        let waitMs = 5 * 60 * 1000; // Default 5 minutes
+
+        if (resetMatch) {
+          const resetTime = new Date(resetMatch[1]).getTime();
+          const now = Date.now();
+          if (resetTime > now) {
+            waitMs = Math.min(resetTime - now + 5000, 30 * 60 * 1000); // Cap at 30 min
+          }
+        }
+
+        console.error(`[Discord] Rate limited (attempt ${attempt}/${maxRetries}). Waiting ${Math.round(waitMs/1000)}s...`);
+
+        if (attempt === maxRetries) {
+          throw new Error(`Discord rate limited. Resets at ${resetMatch?.[1] || 'unknown'}. Max retries exceeded.`);
+        }
+
+        await new Promise(r => setTimeout(r, waitMs));
+      } else {
+        // Unknown error, don't retry
+        throw error;
+      }
+    }
+  }
 
   if (!isReady) {
     await new Promise<void>((resolve) => {
