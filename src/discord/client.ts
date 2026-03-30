@@ -44,6 +44,10 @@ export function isAllowedDmUser(userId: string): boolean {
   return ALLOWED_DM_USERS.has(userId);
 }
 
+export function canReceiveDm(userId: string): boolean {
+  return ALLOWED_DM_USERS.has(userId) || isRestrictedUser(userId);
+}
+
 // ============================================================
 // ADMIN CONTEXT (in-memory for full-access users)
 // ============================================================

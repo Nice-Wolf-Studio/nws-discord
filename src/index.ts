@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { createApp } from './http/server.js';
-import { initDiscord } from './discord/client.js';
+import { botManager } from './discord/bot-manager.js';
 import { cleanupDedup, cleanupAuditLog, cleanupOldPersonalitySessions } from './db/queries.js';
 
 // Import db to initialize it
@@ -13,10 +13,10 @@ const DEDUP_WINDOW = parseInt(process.env.DEDUP_WINDOW_SECONDS || '300', 10);
 async function main() {
   console.log('Starting nws-discord service...');
 
-  // Initialize Discord
-  console.log('Connecting to Discord...');
-  await initDiscord();
-  console.log('Discord connected!');
+  // Initialize Discord bots
+  console.log('Connecting Discord bots...');
+  await botManager.initialize();
+  console.log('Discord bots connected!');
 
   // Start HTTP server
   const app = createApp();

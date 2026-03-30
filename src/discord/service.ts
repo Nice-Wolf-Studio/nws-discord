@@ -1,5 +1,5 @@
 import { EmbedBuilder, TextChannel } from 'discord.js';
-import { getChannel, getAllChannels, getGuilds, isDiscordReady, getDmChannel, isAllowedDmUser, getUser } from './client.js';
+import { botManager } from './bot-manager.js';
 import { checkDedup, setDedup, logAction, canAccessChannel, getChannelPermissions } from '../db/queries.js';
 
 export interface DiscordEmbed {
@@ -16,6 +16,7 @@ export interface DiscordEmbed {
 }
 
 export interface SendMessageOptions {
+  botId?: string; // Which bot sends - defaults to 'sombra'
   channelId: string;
   content?: string;
   embed?: DiscordEmbed;
@@ -30,9 +31,12 @@ export interface ServiceResult<T> {
   errorCode?: string;
 }
 
+// Default bot for backward compatibility
+const DEFAULT_BOT = 'sombra';
+
 export class DiscordService {
   async sendMessage(options: SendMessageOptions): Promise<ServiceResult<{ messageId: string }>> {
-    const { channelId, content, embed, idempotencyKey, apiKeyId } = options;
+    const { botId = DEFAULT_BOT, channelId, content, embed, idempotencyKey, apiKeyId } = options;
 
     // Check permissions
     if (!canAccessChannel(apiKeyId, channelId, true)) {
@@ -47,8 +51,8 @@ export class DiscordService {
       }
     }
 
-    // Get channel
-    const channel = await getChannel(channelId);
+    // Get channel via bot
+    const channel = await botManager.getChannel(botId, channelId);
     if (!channel) {
       return { success: false, error: 'Channel not found or bot cannot access it', errorCode: 'BOT_MISSING_ACCESS' };
     }
@@ -98,13 +102,14 @@ export class DiscordService {
     channelId: string,
     messageId: string,
     content?: string,
-    embed?: DiscordEmbed
+    embed?: DiscordEmbed,
+    botId: string = DEFAULT_BOT
   ): Promise<ServiceResult<{ messageId: string }>> {
     if (!canAccessChannel(apiKeyId, channelId, true)) {
       return { success: false, error: 'API key does not have write access to this channel', errorCode: 'CHANNEL_NOT_ALLOWED' };
     }
 
-    const channel = await getChannel(channelId);
+    const channel = await botManager.getChannel(botId, channelId);
     if (!channel) {
       return { success: false, error: 'Channel not found', errorCode: 'BOT_MISSING_ACCESS' };
     }
@@ -136,13 +141,14 @@ export class DiscordService {
   async deleteMessage(
     apiKeyId: string,
     channelId: string,
-    messageId: string
+    messageId: string,
+    botId: string = DEFAULT_BOT
   ): Promise<ServiceResult<void>> {
     if (!canAccessChannel(apiKeyId, channelId, true)) {
       return { success: false, error: 'API key does not have write access to this channel', errorCode: 'CHANNEL_NOT_ALLOWED' };
     }
 
-    const channel = await getChannel(channelId);
+    const channel = await botManager.getChannel(botId, channelId);
     if (!channel) {
       return { success: false, error: 'Channel not found', errorCode: 'BOT_MISSING_ACCESS' };
     }
@@ -162,13 +168,14 @@ export class DiscordService {
   async readMessages(
     apiKeyId: string,
     channelId: string,
-    limit = 50
+    limit = 50,
+    botId: string = DEFAULT_BOT
   ): Promise<ServiceResult<Array<{ id: string; content: string; author: string; timestamp: string }>>> {
     if (!canAccessChannel(apiKeyId, channelId, false)) {
       return { success: false, error: 'API key does not have read access to this channel', errorCode: 'CHANNEL_NOT_ALLOWED' };
     }
 
-    const channel = await getChannel(channelId);
+    const channel = await botManager.getChannel(botId, channelId);
     if (!channel) {
       return { success: false, error: 'Channel not found', errorCode: 'BOT_MISSING_ACCESS' };
     }
@@ -194,13 +201,14 @@ export class DiscordService {
     apiKeyId: string,
     channelId: string,
     messageId: string,
-    emoji: string
+    emoji: string,
+    botId: string = DEFAULT_BOT
   ): Promise<ServiceResult<void>> {
     if (!canAccessChannel(apiKeyId, channelId, true)) {
       return { success: false, error: 'API key does not have write access to this channel', errorCode: 'CHANNEL_NOT_ALLOWED' };
     }
 
-    const channel = await getChannel(channelId);
+    const channel = await botManager.getChannel(botId, channelId);
     if (!channel) {
       return { success: false, error: 'Channel not found', errorCode: 'BOT_MISSING_ACCESS' };
     }
@@ -218,28 +226,34 @@ export class DiscordService {
   }
 
   listChannels(apiKeyId: string) {
-    const allChannels = getAllChannels();
+    // For now, return empty - channels would need to be collected across all bots
+    // This is a Phase B concern
     const permissions = getChannelPermissions(apiKeyId);
-    const allowedIds = new Set(permissions.map((p) => p.channel_id));
-
-    return allChannels.filter((c) => allowedIds.has(c.id));
+    return permissions.map(p => ({
+      id: p.channel_id,
+      name: 'unknown', // Would need channel fetch
+      type: 0,
+      guildId: 'unknown',
+      guildName: 'unknown',
+    }));
   }
 
   listGuilds() {
-    return getGuilds();
+    return botManager.getGuilds();
   }
 
   // DM Methods
   async sendDm(
     userId: string,
     content?: string,
-    embed?: DiscordEmbed
+    embed?: DiscordEmbed,
+    botId: string = DEFAULT_BOT
   ): Promise<ServiceResult<{ messageId: string }>> {
-    if (!isAllowedDmUser(userId)) {
+    if (!botManager.canReceiveDm(userId)) {
       return { success: false, error: 'User not allowed for DMs', errorCode: 'DM_NOT_ALLOWED' };
     }
 
-    const dmChannel = await getDmChannel(userId);
+    const dmChannel = await botManager.getDmChannel(botId, userId);
     if (!dmChannel) {
       return { success: false, error: 'Could not create DM channel', errorCode: 'DM_FAILED' };
     }
@@ -270,13 +284,14 @@ export class DiscordService {
 
   async readDms(
     userId: string,
-    limit = 50
+    limit = 50,
+    botId: string = DEFAULT_BOT
   ): Promise<ServiceResult<Array<{ id: string; content: string; author: string; timestamp: string; fromBot: boolean }>>> {
-    if (!isAllowedDmUser(userId)) {
+    if (!botManager.canReceiveDm(userId)) {
       return { success: false, error: 'User not allowed for DMs', errorCode: 'DM_NOT_ALLOWED' };
     }
 
-    const dmChannel = await getDmChannel(userId);
+    const dmChannel = await botManager.getDmChannel(botId, userId);
     if (!dmChannel) {
       return { success: false, error: 'Could not create DM channel', errorCode: 'DM_FAILED' };
     }
@@ -299,12 +314,18 @@ export class DiscordService {
   }
 
   isAllowedDmUser(userId: string): boolean {
-    return isAllowedDmUser(userId);
+    return botManager.isAllowedDmUser(userId);
+  }
+
+  canReceiveDm(userId: string): boolean {
+    return botManager.canReceiveDm(userId);
   }
 
   getHealth() {
+    const onlineBots = botManager.getOnlineBots();
     return {
-      discordReady: isDiscordReady(),
+      discordReady: botManager.isReady(),
+      bots: onlineBots,
       timestamp: new Date().toISOString(),
     };
   }
