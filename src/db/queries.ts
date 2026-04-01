@@ -512,3 +512,187 @@ export function denyAccessRequest(userId: string): boolean {
   `).run(userId);
   return result.changes > 0;
 }
+
+// ============================================================
+// Personality Engine Queries
+// ============================================================
+
+import type { Brain, Personality, ChannelAcl, UsageLogEntry } from '../ai/types.js';
+
+// Brain queries
+export function getBrain(id: string): Brain | null {
+  const result = db.prepare(`
+    SELECT * FROM brains WHERE id = ? AND enabled = 1
+  `).get(id) as Brain | undefined;
+  return result || null;
+}
+
+export function listBrains(): Brain[] {
+  return db.prepare(`
+    SELECT * FROM brains WHERE enabled = 1 ORDER BY name
+  `).all() as Brain[];
+}
+
+// Personality queries
+export function getPersonality(id: string): Personality | null {
+  const result = db.prepare(`
+    SELECT * FROM personalities WHERE id = ? AND enabled = 1
+  `).get(id) as Personality | undefined;
+  return result || null;
+}
+
+export function getPersonalityByName(name: string): Personality | null {
+  const result = db.prepare(`
+    SELECT * FROM personalities WHERE name = ? AND enabled = 1
+  `).get(name) as Personality | undefined;
+  return result || null;
+}
+
+export function listEnabledPersonalities(): Personality[] {
+  return db.prepare(`
+    SELECT * FROM personalities WHERE enabled = 1 ORDER BY name
+  `).all() as Personality[];
+}
+
+// Channel ACL queries
+export function getChannelAcl(personalityId: string, channelId: string): ChannelAcl | null {
+  const result = db.prepare(`
+    SELECT * FROM personality_channels
+    WHERE personality_id = ? AND channel_id = ?
+  `).get(personalityId, channelId) as ChannelAcl | undefined;
+  return result || null;
+}
+
+export function setChannelAcl(
+  personalityId: string,
+  channelId: string,
+  options: Partial<Omit<ChannelAcl, 'personality_id' | 'channel_id' | 'created_at'>>
+): void {
+  const existing = getChannelAcl(personalityId, channelId);
+
+  if (existing) {
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+
+    if (options.guild_id !== undefined) {
+      updates.push('guild_id = ?');
+      values.push(options.guild_id);
+    }
+    if (options.can_respond !== undefined) {
+      updates.push('can_respond = ?');
+      values.push(options.can_respond);
+    }
+    if (options.respond_to_mentions !== undefined) {
+      updates.push('respond_to_mentions = ?');
+      values.push(options.respond_to_mentions);
+    }
+    if (options.respond_to_all !== undefined) {
+      updates.push('respond_to_all = ?');
+      values.push(options.respond_to_all);
+    }
+    if (options.bot_response_chance !== undefined) {
+      updates.push('bot_response_chance = ?');
+      values.push(options.bot_response_chance);
+    }
+    if (options.bot_cooldown_seconds !== undefined) {
+      updates.push('bot_cooldown_seconds = ?');
+      values.push(options.bot_cooldown_seconds);
+    }
+
+    if (updates.length > 0) {
+      values.push(personalityId, channelId);
+      db.prepare(`
+        UPDATE personality_channels SET ${updates.join(', ')}
+        WHERE personality_id = ? AND channel_id = ?
+      `).run(...values);
+    }
+  } else {
+    db.prepare(`
+      INSERT INTO personality_channels (
+        personality_id, channel_id, guild_id, can_respond, respond_to_mentions,
+        respond_to_all, bot_response_chance, bot_cooldown_seconds, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      personalityId,
+      channelId,
+      options.guild_id ?? null,
+      options.can_respond ?? 1,
+      options.respond_to_mentions ?? 1,
+      options.respond_to_all ?? 0,
+      options.bot_response_chance ?? 0.3,
+      options.bot_cooldown_seconds ?? 10,
+      Date.now()
+    );
+  }
+}
+
+export function updateChannelLastResponse(personalityId: string, channelId: string): void {
+  db.prepare(`
+    UPDATE personality_channels SET last_response_at = ?
+    WHERE personality_id = ? AND channel_id = ?
+  `).run(Date.now(), personalityId, channelId);
+}
+
+export function removeChannelAcl(personalityId: string, channelId: string): boolean {
+  const result = db.prepare(`
+    DELETE FROM personality_channels WHERE personality_id = ? AND channel_id = ?
+  `).run(personalityId, channelId);
+  return result.changes > 0;
+}
+
+// Usage logging
+export function logUsage(entry: Omit<UsageLogEntry, 'id' | 'created_at'>): void {
+  const id = nanoid(12);
+  db.prepare(`
+    INSERT INTO usage_log (
+      id, user_id, personality_id, brain_id, channel_id,
+      input_tokens, output_tokens, latency_ms, success, error, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    entry.user_id,
+    entry.personality_id,
+    entry.brain_id,
+    entry.channel_id,
+    entry.input_tokens,
+    entry.output_tokens,
+    entry.latency_ms,
+    entry.success,
+    entry.error,
+    Date.now()
+  );
+}
+
+export function getUsageStats(personalityId?: string, days = 7): {
+  total_requests: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  success_rate: number;
+} {
+  const cutoff = Date.now() - (days * 24 * 60 * 60 * 1000);
+
+  let query = `
+    SELECT
+      COUNT(*) as total_requests,
+      COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+      COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+      COALESCE(AVG(success), 0) as success_rate
+    FROM usage_log
+    WHERE created_at > ?
+  `;
+  const params: (string | number)[] = [cutoff];
+
+  if (personalityId) {
+    query += ' AND personality_id = ?';
+    params.push(personalityId);
+  }
+
+  const result = db.prepare(query).get(...params) as {
+    total_requests: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+    success_rate: number;
+  };
+
+  return result;
+}

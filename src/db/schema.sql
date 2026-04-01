@@ -119,6 +119,89 @@ CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(sess
 CREATE INDEX IF NOT EXISTS idx_personality_sessions_user ON personality_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_personality_sessions_date ON personality_sessions(date);
 
+-- ============================================
+-- Personality Engine Tables (v3)
+-- ============================================
+
+-- Brain configurations (model + parameters)
+CREATE TABLE IF NOT EXISTS brains (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  provider TEXT NOT NULL DEFAULT 'anthropic',
+  model TEXT NOT NULL,
+  max_tokens INTEGER DEFAULT 1024,
+  temperature REAL DEFAULT 1.0,
+  top_p REAL,                              -- Nucleus sampling threshold
+  top_k INTEGER,                           -- Top-K sampling limit
+  enabled INTEGER DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Personality definitions
+CREATE TABLE IF NOT EXISTS personalities (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,               -- 'princess-donut'
+  display_name TEXT NOT NULL,              -- 'Princess Donut'
+  discord_token_env TEXT NOT NULL,         -- 'DONUT_DISCORD_TOKEN'
+  brain_id TEXT NOT NULL,
+  system_prompt TEXT NOT NULL,             -- Full prompt text
+  greeting TEXT,                           -- Optional new session greeting
+  error_response TEXT,                     -- Personality-flavored error
+  is_admin INTEGER DEFAULT 0,
+  enabled INTEGER DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (brain_id) REFERENCES brains(id)
+);
+
+-- Channel ACL with bot-to-bot settings
+CREATE TABLE IF NOT EXISTS personality_channels (
+  personality_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  guild_id TEXT,                           -- NULL = DM
+  can_respond INTEGER DEFAULT 1,
+  respond_to_mentions INTEGER DEFAULT 1,
+  respond_to_all INTEGER DEFAULT 0,
+  bot_response_chance REAL DEFAULT 0.3,    -- Chance to respond to other bots (0.0-1.0)
+  bot_cooldown_seconds INTEGER DEFAULT 10, -- Cooldown after speaking
+  last_response_at INTEGER,                -- Track cooldown per channel
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (personality_id, channel_id),
+  FOREIGN KEY (personality_id) REFERENCES personalities(id) ON DELETE CASCADE
+);
+
+-- Rate limits per user per personality (stubbed)
+CREATE TABLE IF NOT EXISTS rate_limits (
+  user_id TEXT NOT NULL,
+  personality_id TEXT NOT NULL,
+  requests_today INTEGER DEFAULT 0,
+  tokens_today INTEGER DEFAULT 0,
+  last_request_at INTEGER,
+  reset_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, personality_id)
+);
+
+-- Usage log for debugging + cost analysis
+CREATE TABLE IF NOT EXISTS usage_log (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  personality_id TEXT NOT NULL,
+  brain_id TEXT NOT NULL,
+  channel_id TEXT,                         -- NULL = DM
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  latency_ms INTEGER NOT NULL,
+  success INTEGER NOT NULL,
+  error TEXT,
+  created_at INTEGER NOT NULL
+);
+
+-- Personality Engine Indexes
+CREATE INDEX IF NOT EXISTS idx_personality_channels_channel ON personality_channels(channel_id);
+CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_log_personality ON usage_log(personality_id);
+
 -- Migrations (for existing databases)
 -- Add locked_by and locked_at columns if they don't exist
 -- SQLite doesn't support ADD COLUMN IF NOT EXISTS, so these will fail silently on fresh dbs

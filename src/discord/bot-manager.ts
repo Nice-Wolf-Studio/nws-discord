@@ -2,9 +2,10 @@
  * BotManager - manages multiple Discord.js clients
  *
  * Each bot:
- * - Has its own Client instance
- * - Connects to gateway independently (green dot)
- * - Handles its own messages based on config
+ * - Has its own Client instance (isolated Discord connection)
+ * - Loads personality from database
+ * - Uses PersonalityEngine for AI calls (no shared state)
+ * - Handles DMs and channel messages with ACL
  */
 
 import {
@@ -16,10 +17,15 @@ import {
   DMChannel,
   User,
   ActivityType,
-  PresenceUpdateStatus,
 } from 'discord.js';
-import { BOT_CONFIGS, BotConfig, getAdminBot } from './bots.config.js';
+import { execute as executePersonality, getGreeting } from '../ai/index.js';
+import type { Personality, ConversationMessage } from '../ai/types.js';
+import { shouldRespond as checkShouldRespond } from './message-router.js';
 import {
+  listEnabledPersonalities,
+  getPersonality,
+  getChannelAcl,
+  updateChannelLastResponse,
   isRestrictedUser,
   hasPendingRequest,
   createAccessRequest,
@@ -30,11 +36,9 @@ import {
   getOrCreatePersonalitySession,
   updatePersonalitySession,
   clearPersonalitySessions,
-  getActivePersonality,
-  setActivePersonality,
-  clearActivePersonality,
   storeIncomingDm,
 } from '../db/queries.js';
+import { seedDatabase } from '../db/seed.js';
 
 // ============================================================
 // TYPES
@@ -42,7 +46,7 @@ import {
 
 interface BotInstance {
   client: Client;
-  config: BotConfig;
+  personality: Personality;
   isReady: boolean;
 }
 
@@ -63,39 +67,46 @@ const LOGIN_STAGGER_MS = 5000;
 
 class BotManager {
   private bots: Map<string, BotInstance> = new Map();
-  private adminContext: Map<string, string[]> = new Map();
+  private adminContext: Map<string, ConversationMessage[]> = new Map();
 
   async initialize(): Promise<void> {
     console.log('[BotManager] Starting initialization...');
 
-    for (const config of BOT_CONFIGS) {
-      const token = process.env[config.tokenEnvVar];
+    // Seed database with default brains and personalities
+    seedDatabase();
+
+    // Load personalities from database
+    const personalities = listEnabledPersonalities();
+    console.log(`[BotManager] Found ${personalities.length} enabled personalities`);
+
+    for (const personality of personalities) {
+      const token = process.env[personality.discord_token_env];
 
       if (!token) {
-        console.warn(`[BotManager] No token for ${config.id} (${config.tokenEnvVar}), skipping`);
+        console.warn(`[BotManager] No token for ${personality.name} (${personality.discord_token_env}), skipping`);
         continue;
       }
 
       try {
-        await this.initializeBot(config, token);
+        await this.initializeBot(personality, token);
 
         // Stagger next login to avoid rate limits
-        if (BOT_CONFIGS.indexOf(config) < BOT_CONFIGS.length - 1) {
+        if (personalities.indexOf(personality) < personalities.length - 1) {
           console.log(`[BotManager] Waiting ${LOGIN_STAGGER_MS}ms before next bot...`);
           await this.sleep(LOGIN_STAGGER_MS);
         }
       } catch (error) {
-        console.error(`[BotManager] Failed to initialize ${config.id}:`, error);
+        console.error(`[BotManager] Failed to initialize ${personality.name}:`, error);
         // Continue with other bots
       }
     }
 
     const onlineCount = Array.from(this.bots.values()).filter(b => b.isReady).length;
-    console.log(`[BotManager] Initialization complete. ${onlineCount}/${BOT_CONFIGS.length} bots online`);
+    console.log(`[BotManager] Initialization complete. ${onlineCount}/${personalities.length} bots online`);
   }
 
-  private async initializeBot(config: BotConfig, token: string): Promise<void> {
-    console.log(`[BotManager] Initializing ${config.name}...`);
+  private async initializeBot(personality: Personality, token: string): Promise<void> {
+    console.log(`[BotManager] Initializing ${personality.display_name}...`);
 
     const client = new Client({
       intents: [
@@ -110,27 +121,27 @@ class BotManager {
 
     const instance: BotInstance = {
       client,
-      config,
+      personality,
       isReady: false,
     };
 
     // Setup event handlers
     client.on('ready', () => {
-      console.log(`[BotManager] ${config.name} logged in as ${client.user?.tag}`);
+      console.log(`[BotManager] ${personality.display_name} logged in as ${client.user?.tag}`);
       instance.isReady = true;
 
       // Set presence to show green dot
       client.user?.setPresence({
-        status: 'online' as PresenceUpdateStatus,
-        activities: config.personality
-          ? [{ name: `being ${config.name}`, type: ActivityType.Playing }]
-          : [{ name: 'for commands', type: ActivityType.Listening }],
+        status: 'online',
+        activities: personality.is_admin
+          ? [{ name: 'for commands', type: ActivityType.Listening }]
+          : [{ name: `being ${personality.display_name}`, type: ActivityType.Playing }],
       });
-      console.log(`[BotManager] ${config.name} presence set to online`);
+      console.log(`[BotManager] ${personality.display_name} presence set to online`);
     });
 
     client.on('error', (error) => {
-      console.error(`[BotManager] ${config.name} error:`, error);
+      console.error(`[BotManager] ${personality.display_name} error:`, error);
     });
 
     // Message handler - scoped to THIS bot
@@ -139,7 +150,7 @@ class BotManager {
     });
 
     // Login with retry for rate limits
-    await this.loginWithRetry(client, token, config.name);
+    await this.loginWithRetry(client, token, personality.display_name);
 
     // Wait for ready
     if (!instance.isReady) {
@@ -148,7 +159,7 @@ class BotManager {
       });
     }
 
-    this.bots.set(config.id, instance);
+    this.bots.set(personality.id, instance);
   }
 
   private async loginWithRetry(client: Client, token: string, name: string): Promise<void> {
@@ -192,37 +203,61 @@ class BotManager {
   // ============================================================
 
   private async handleMessage(message: Message, bot: BotInstance): Promise<void> {
-    // Ignore bot messages
-    if (message.author.bot) return;
+    const botUserId = bot.client.user?.id;
+    if (!botUserId) return;
 
-    // Only handle DMs for now
-    if (!message.channel.isDMBased()) return;
-
+    const { personality } = bot;
     const userId = message.author.id;
     const content = message.content.trim();
-    const { config } = bot;
+    const isDm = message.channel.isDMBased();
+    const authorIsBot = message.author.bot;
+
+    // Get channel ACL for non-DM messages
+    const channelAcl = isDm ? null : getChannelAcl(personality.id, message.channel.id);
+
+    // Check if we should respond using MessageRouter
+    const decision = checkShouldRespond(botUserId, message, channelAcl, authorIsBot);
+
+    if (!decision.shouldRespond) {
+      // Only log ignored messages in channels (not spam from other bots)
+      if (!isDm && decision.reason !== 'self') {
+        // Silent ignore for channel messages
+      }
+      return;
+    }
 
     // Record incoming DM
-    storeIncomingDm(
-      message.id,
-      userId,
-      message.author.tag,
-      content
-    );
+    if (isDm && !authorIsBot) {
+      storeIncomingDm(message.id, userId, message.author.tag, content);
+    }
 
-    // Route based on bot type and user type
-    if (config.isAdmin) {
-      // Admin bot (Sombra) handles all user types
-      if (this.isAllowedDmUser(userId)) {
-        await this.handleAdminMessage(message, content, bot);
-      } else if (isRestrictedUser(userId)) {
-        await this.handleRestrictedMessage(message, content, bot);
+    // Route based on bot type and context
+    if (personality.is_admin) {
+      if (isDm) {
+        // Admin bot DM handling
+        if (this.isAllowedDmUser(userId)) {
+          await this.handleAdminMessage(message, content, bot);
+        } else if (isRestrictedUser(userId)) {
+          await this.handleRestrictedMessage(message, content, bot);
+        } else {
+          await this.handleUnknownUser(message, bot);
+        }
       } else {
-        await this.handleUnknownUser(message, bot);
+        // Admin bot in channel - respond with personality
+        await this.handleChannelMessage(message, content, bot);
       }
     } else {
-      // Personality bots handle anyone who DMs them
-      await this.handlePersonalityBotMessage(message, content, bot);
+      // Personality bot
+      if (isDm) {
+        await this.handlePersonalityDm(message, content, bot);
+      } else {
+        await this.handleChannelMessage(message, content, bot);
+      }
+    }
+
+    // Update cooldown for channel messages
+    if (!isDm && channelAcl) {
+      updateChannelLastResponse(personality.id, message.channel.id);
     }
   }
 
@@ -233,7 +268,7 @@ class BotManager {
   private async handleAdminMessage(message: Message, content: string, bot: BotInstance): Promise<void> {
     const userId = message.author.id;
     const lower = content.toLowerCase();
-    const { config, client } = bot;
+    const { personality, client } = bot;
 
     // Admin commands
     if (lower === '/clear' || lower === '/new') {
@@ -308,49 +343,46 @@ class BotManager {
       return;
     }
 
-    // Regular message to Sombra
-    console.log(`[${config.name}] [ADMIN] ${message.author.tag}: ${content.substring(0, 50)}...`);
+    // Regular message to admin bot - use PersonalityEngine
+    console.log(`[${personality.display_name}] [ADMIN] ${message.author.tag}: ${content.substring(0, 50)}...`);
 
     try {
-      const context = this.getAdminContext(userId);
-      this.addToAdminContext(userId, 'user', content);
+      const context = this.adminContext.get(userId) || [];
 
-      const response = await fetch(config.aiEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: userId,
-          message: content,
-          context: context || undefined,
-        }),
+      const result = await executePersonality({
+        user_id: userId,
+        personality_id: personality.id,
+        message: content,
+        context,
+        is_dm: true,
       });
 
-      if (!response.ok) throw new Error(`AI returned ${response.status}`);
-
-      const result = await response.json() as { success: boolean; response: string; duration_ms?: number };
-
       if (result.success) {
-        this.addToAdminContext(userId, 'assistant', result.response);
-        await message.reply(result.response.slice(0, 1900));
-        console.log(`[${config.name}] [ADMIN] Responded in ${result.duration_ms || 0}ms`);
+        // Update context
+        const newContext = [...context, { role: 'user' as const, content }];
+        newContext.push({ role: 'assistant' as const, content: result.response });
+        while (newContext.length > MAX_CONTEXT) newContext.shift();
+        this.adminContext.set(userId, newContext);
+
+        await message.reply(result.response);
+        console.log(`[${personality.display_name}] [ADMIN] Responded in ${result.latency_ms}ms`);
       } else {
-        await message.reply("Something went wrong. Try again?");
+        await message.reply(personality.error_response || "Something went wrong. Try again?");
       }
     } catch (error) {
-      console.error(`[${config.name}] AI call failed:`, error);
-      await message.reply("Couldn't reach AI backend. Is it running?");
+      console.error(`[${personality.display_name}] PersonalityEngine failed:`, error);
+      await message.reply(personality.error_response || "Couldn't process that. Try again?");
     }
   }
 
   private async handleRestrictedMessage(message: Message, content: string, bot: BotInstance): Promise<void> {
-    // Restricted users talking to Sombra - redirect them to personality bots
     await message.reply(`Hey! You should DM the personality bots directly now. They'll respond as themselves.`);
   }
 
   private async handleUnknownUser(message: Message, bot: BotInstance): Promise<void> {
     const userId = message.author.id;
     const username = message.author.tag;
-    const { client, config } = bot;
+    const { client, personality } = bot;
 
     if (hasPendingRequest(userId)) {
       await message.reply("Your request is still pending. I'll let you know when you're approved!");
@@ -381,15 +413,15 @@ class BotManager {
   // PERSONALITY BOT HANDLERS (Donut, Mordecai, etc)
   // ============================================================
 
-  private async handlePersonalityBotMessage(message: Message, content: string, bot: BotInstance): Promise<void> {
+  private async handlePersonalityDm(message: Message, content: string, bot: BotInstance): Promise<void> {
     const userId = message.author.id;
-    const { config } = bot;
+    const { personality } = bot;
 
     // Check if user is allowed (admin or restricted)
     if (!this.isAllowedDmUser(userId) && !isRestrictedUser(userId)) {
-      // Unknown user - tell them to request access via Sombra
-      const adminBot = getAdminBot();
-      await message.reply(`*looks confused*\n\nI don't know you. DM @${adminBot?.name || 'Sombra'} to request access first.`);
+      // Unknown user - tell them to request access via admin bot
+      const adminBot = this.getAdminBot();
+      await message.reply(`*looks confused*\n\nI don't know you. DM @${adminBot?.personality.display_name || 'Sombra'} to request access first.`);
       return;
     }
 
@@ -400,62 +432,68 @@ class BotManager {
       return;
     }
 
-    // Get or create session for this bot's personality
+    // Get or create session
     const today = new Date().toISOString().split('T')[0];
-    const session = getOrCreatePersonalitySession(userId, config.personality!, today);
+    const session = getOrCreatePersonalitySession(userId, personality.name, today);
 
-    const context = JSON.parse(session.context) as Array<{ role: string; content: string }>;
-    context.push({ role: 'user', content });
+    const context = JSON.parse(session.context) as ConversationMessage[];
+    const newContext = [...context, { role: 'user' as const, content }];
 
-    while (context.length > MAX_CONTEXT) context.shift();
+    while (newContext.length > MAX_CONTEXT) newContext.shift();
 
-    console.log(`[${config.name}] ${message.author.tag}: ${content.substring(0, 50)}...`);
+    console.log(`[${personality.display_name}] ${message.author.tag}: ${content.substring(0, 50)}...`);
 
     try {
-      const response = await fetch(config.aiEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: userId,
-          message: content,
-          context: context,
-          personality: config.personality,
-        }),
+      const result = await executePersonality({
+        user_id: userId,
+        personality_id: personality.id,
+        message: content,
+        context,
+        is_dm: true,
       });
 
-      if (!response.ok) throw new Error(`AI returned ${response.status}`);
-
-      const result = await response.json() as { success: boolean; response: string; duration_ms?: number };
-
       if (result.success) {
-        context.push({ role: 'assistant', content: result.response });
-        updatePersonalitySession(session.id, JSON.stringify(context));
+        newContext.push({ role: 'assistant' as const, content: result.response });
+        updatePersonalitySession(session.id, JSON.stringify(newContext));
 
-        await message.reply(result.response.slice(0, 1900));
-        console.log(`[${config.name}] Responded in ${result.duration_ms || 0}ms`);
+        await message.reply(result.response);
+        console.log(`[${personality.display_name}] Responded in ${result.latency_ms}ms`);
       } else {
-        await message.reply("*looks annoyed*\n\nSomething went wrong. Try again.");
+        await message.reply(personality.error_response || "*looks annoyed*\n\nSomething went wrong. Try again.");
       }
     } catch (error) {
-      console.error(`[${config.name}] AI call failed:`, error);
-      await message.reply("*sighs*\n\nI can't think right now. Try again later.");
+      console.error(`[${personality.display_name}] PersonalityEngine failed:`, error);
+      await message.reply(personality.error_response || "*sighs*\n\nI can't think right now. Try again later.");
     }
   }
 
-  // ============================================================
-  // CONTEXT MANAGEMENT
-  // ============================================================
+  private async handleChannelMessage(message: Message, content: string, bot: BotInstance): Promise<void> {
+    const userId = message.author.id;
+    const { personality } = bot;
+    const channelId = message.channel.id;
 
-  private getAdminContext(userId: string): string {
-    const history = this.adminContext.get(userId) || [];
-    return history.join('\n');
-  }
+    console.log(`[${personality.display_name}] [CHANNEL] ${message.author.tag}: ${content.substring(0, 50)}...`);
 
-  private addToAdminContext(userId: string, role: 'user' | 'assistant', message: string): void {
-    const history = this.adminContext.get(userId) || [];
-    history.push(`${role === 'user' ? 'User' : 'Sombra'}: ${message}`);
-    while (history.length > 10) history.shift();
-    this.adminContext.set(userId, history);
+    try {
+      // Channel messages are stateless (no session)
+      const result = await executePersonality({
+        user_id: userId,
+        personality_id: personality.id,
+        message: content,
+        channel_id: channelId,
+        is_dm: false,
+      });
+
+      if (result.success) {
+        await message.reply(result.response);
+        console.log(`[${personality.display_name}] [CHANNEL] Responded in ${result.latency_ms}ms`);
+      } else {
+        // Silent fail for channel messages to avoid spam
+        console.error(`[${personality.display_name}] [CHANNEL] Failed:`, result.error);
+      }
+    } catch (error) {
+      console.error(`[${personality.display_name}] [CHANNEL] PersonalityEngine failed:`, error);
+    }
   }
 
   // ============================================================
@@ -472,6 +510,10 @@ class BotManager {
 
   getBot(botId: string): BotInstance | undefined {
     return this.bots.get(botId);
+  }
+
+  getAdminBot(): BotInstance | undefined {
+    return Array.from(this.bots.values()).find(b => b.personality.is_admin === 1);
   }
 
   getClient(botId: string): Client | undefined {
@@ -552,7 +594,7 @@ class BotManager {
       .filter(([_, bot]) => bot.isReady)
       .map(([id, bot]) => ({
         id,
-        name: bot.config.name,
+        name: bot.personality.display_name,
         tag: bot.client.user?.tag || 'unknown',
       }));
   }
